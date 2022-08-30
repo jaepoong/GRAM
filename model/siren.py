@@ -20,20 +20,17 @@ def sine_init(m):
             num_input = m.weight.size(-1)
             m.weight.uniform_(-np.sqrt(6 / num_input) / 30, np.sqrt(6 / num_input) / 30)
 
-
 def first_layer_sine_init(m):
     with torch.no_grad():
         if isinstance(m, nn.Linear):
             num_input = m.weight.size(-1)
             m.weight.uniform_(-1 / num_input, 1 / num_input)
 
-
 def film_sine_init(m):
     with torch.no_grad():
         if isinstance(m, nn.Linear):
             num_input = m.weight.size(-1)
             m.weight.uniform_(-np.sqrt(6 / num_input) / 30, np.sqrt(6 / num_input) / 30)
-
 
 def first_layer_film_sine_init(m):
     """ film sine init"""
@@ -42,16 +39,15 @@ def first_layer_film_sine_init(m):
             num_input = m.weight.size(-1)
             m.weight.uniform_(-1 / num_input, 1 / num_input)
 
-
 def kaiming_leaky_init(m):
     classname = m.__class__.__name__
     if classname.find('Linear') != -1:
         torch.nn.init.kaiming_normal_(m.weight, a=0.2, mode='fan_in', nonlinearity='leaky_relu')
 
 class CustomMappingNetwork(nn.Module):
-    """ this network is mapping network
-    that make affine transform for siren gamma and beta~^
-
+    """ this network is mapping network 
+    that make affine transform for siren gamma and beta
+    냐미...
     Args:
         z_dim (int) : Gaussian noise dimension
         map_hidden_dim(int) : size of hidden Linear Perceptron
@@ -88,7 +84,6 @@ class CustomMappingNetwork(nn.Module):
 
         return frequencies, phase_shifts
 
-
 def frequency_init(freq):
     """ frequency uniform init -> make random uniform frequency"""
     def init(m):
@@ -110,6 +105,10 @@ class FiLMLayer(nn.Module):
         return torch.sin(freq * x + phase_shift)
     
 class ToOccupancy(nn.Module):
+    """
+    occupancy network! 
+    it has linear layer that output one occupancy
+    """
     def __init__(self,input_dim):
         super().__init__()
         self.layer=nn.Linear(input_dim,1)
@@ -121,6 +120,11 @@ class ToOccupancy(nn.Module):
         return out
 
 class ToRGB(nn.Module):
+    """To RGB Networks!
+        output 3 dimension RGB, have one linear layers
+    Args:
+        nn (_type_): _description_
+    """
     def __init__(self,input_dim):
         super().__init__()
         self.layer=nn.Linear(input_dim,3)
@@ -144,13 +148,14 @@ class Radiance_Generator(nn.Module):
         num_layer (int) : generator Network의 layer 개수
         
     """
-    def ___init__(self, input_dim=3, z_dim=100, hidden_dim=256, device=None,num_layers=9):
+    def ___init__(self, input_dim=3,output_dim=4 z_dim=100, hidden_dim=256, device=None,num_layers=9):
         super().__init__()
         self.device=device
         self.input_dim = input_dim
         self.z_dim = z_dim
         self.hidden_dim = hidden_dim
         self.num_layers=num_layers
+        self.output_dim=output_dim
         # modulist
         self.layer=nn.ModuleList()
         self.to_occupancy=nn.ModuleList()
@@ -207,61 +212,42 @@ class Radiance_Generator(nn.Module):
         rgb=self.to_RGB[-1](x,rgb)
         
         return torch.cat([rgb,occupancy],dim=-1)
-                
-        
 
-class TALLSIREN(nn.Module):
-    """Primary Generator for GRAM."""
 
-    def __init__(self, input_dim=2, z_dim=100, hidden_dim=256, output_dim=1, device=None):
+class Manifold_predictor(nn.Module):
+    """manifold_predictor M
+    input (x,y,z) to scalar s
+
+    Args:
+        nn (_type_): _description_
+    """
+    def __init__(self,input_dim=3,hidden_dim=128,
+                 act=nn.LeakyReLU(0.2,inplace=True), init='sphere'):
         super().__init__()
-        self.device = device
-        self.input_dim = input_dim
-        self.z_dim = z_dim
-        self.hidden_dim = hidden_dim
-        self.output_dim = output_dim
+        self.init=init
+        self.input_dim=input_dim
+        self.act=act
+        self.hidden_dim=hidden_dim
+        self.layer1=nn.Linear(self.input_dim,self.hidden_dim)
+        self.layer2=nn.Linear(self.hidden_dim,self.hidden_dim)
+        self.layer3=nn.Linear(self.hidden_dim,1)
+        if self.init=='sphere':
+            torch.nn.init.normal_(self.layer1.weight, 0.0, np.sqrt(2)/np.sqrt(hidden_dim))
+            torch.nn.init.constant_(self.layer1.bias, 0.0)
+            
+            torch.nn.init.normal_(self.layer2.weight, 0.0, np.sqrt(2)/np.sqrt(hidden_dim))
+            torch.nn.init.constant_(self.layer2.bias,0.0)
+                
+            torch.nn.init.constant_(self.layer3, 0.0)
+            torch.nn.init.normal_(self.layer3, mean=2*np.sqrt(np.pi) / np.sqrt(hidden_dim), std=0.000001)
+    
+    def forward(self,input):
+        x=input
+        x=self.layer1(x)
+        x=self.act(x)
+        x=self.layer2(x)
+        x=self.act(x)
+        return self.layer3(x)
         
-
-        self.network = nn.ModuleList([
-            FiLMLayer(input_dim, hidden_dim),
-            FiLMLayer(hidden_dim, hidden_dim),
-            FiLMLayer(hidden_dim, hidden_dim),
-            FiLMLayer(hidden_dim, hidden_dim),
-            FiLMLayer(hidden_dim, hidden_dim),
-            FiLMLayer(hidden_dim, hidden_dim),
-            FiLMLayer(hidden_dim, hidden_dim),
-            FiLMLayer(hidden_dim, hidden_dim),
-        ]) 
-        self.final_layer = nn.Linear(hidden_dim, 1) # density
-
-        self.color_layer_sine = FiLMLayer(hidden_dim + 3, hidden_dim) # color with direction
-        self.color_layer_linear = nn.Sequential(nn.Linear(hidden_dim, 3), nn.Sigmoid()) # final color
-
-        self.mapping_network = CustomMappingNetwork(z_dim, 256, (len(self.network) + 1)*hidden_dim*2) # mapping network!
-        # network initialization
-        self.network.apply(frequency_init(25))
-        self.final_layer.apply(frequency_init(25))
-        self.color_layer_sine.apply(frequency_init(25))
-        self.color_layer_linear.apply(frequency_init(25))
-        self.network[0].apply(first_layer_film_sine_init)
-
-    def forward(self, input, z, ray_directions, **kwargs):
-        frequencies, phase_shifts = self.mapping_network(z) # (9,256),(9,256)
-        return self.forward_with_frequencies_phase_shifts(input, frequencies, phase_shifts, ray_directions, **kwargs)
-
-    def forward_with_frequencies_phase_shifts(self, input, frequencies, phase_shifts, ray_directions, **kwargs):
-        frequencies = frequencies*15 + 30 # frequency magnitude changing
-
-        x = input
-
-        for index, layer in enumerate(self.network):
-            start = index * self.hidden_dim
-            end = (index+1) * self.hidden_dim
-            x = layer(x, frequencies[..., start:end], phase_shifts[..., start:end]) # filmsiren -> x
-
-        sigma = self.final_layer(x)
-        rbg = self.color_layer_sine(torch.cat([ray_directions, x], dim=-1), frequencies[..., -self.hidden_dim:], phase_shifts[..., -self.hidden_dim:])
-        rbg = self.color_layer_linear(rbg)
-
-        return torch.cat([rbg, sigma], dim=-1)
-
+        
+        
