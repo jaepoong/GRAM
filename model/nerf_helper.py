@@ -34,20 +34,47 @@ def get_initial_rays_trig(n, num_steps, device, fov, resolution, ray_start, ray_
                           torch.linspace(1, -1, H, device=device)) # x,y grid , it descrete -1 to 1 with W resolution
     x = x.T.flatten() # transform하면 적절하게 x좌표에 맞는다.
     y = y.T.flatten() #  transform하면 잘 맞는다.
-    z = -torch.ones_like(x, device=device) / np.tan((2 * math.pi * fov / 360)/2) # 
+    z = -torch.ones_like(x, device=device) / np.tan((2 * math.pi * fov / 360)/2) 
 
-    rays_d_cam = normalize_vecs(torch.stack([x, y, z], -1))
+    rays_d_cam = normalize_vecs(torch.stack([x, y, z], -1)) # x,y,z 좌표. 정규화됨. (h*w,3)
 
-
+    # (h*w,num_steps,1) : 시작, 끝을 n개로 나누고 그걸 w*h크기만큼 반복.
     z_vals = torch.linspace(ray_start, ray_end, num_steps, device=device).reshape(1, num_steps, 1).repeat(W*H, 1, 1)
-    points = rays_d_cam.unsqueeze(1).repeat(1, num_steps, 1) * z_vals
+    points = rays_d_cam.unsqueeze(1).repeat(1, num_steps, 1) * z_vals #[h*w,num_steps,3] : 크기,step,좌표 : ray의 near,far uniform sample 좌표
 
-    points = torch.stack(n*[points])
-    z_vals = torch.stack(n*[z_vals])
-    rays_d_cam = torch.stack(n*[rays_d_cam]).to(device)
+    points = torch.stack(n*[points]) # 배치개만큼 만들어냄 (n,h*w,num_steps,coords:3)
+    z_vals = torch.stack(n*[z_vals]) # near_far 간격을 배치개만큼 (n,h*w,num_steps,1)
+    rays_d_cam = torch.stack(n*[rays_d_cam]).to(device) # (n,h*w,3) : 배치,크기,좌표
 
-    return points, z_vals, rays_d_cam
+    return points, z_vals, rays_d_cam # 출력으로 ray의 등간격 Sample point, 각 등간격 범위, 시작 ray 좌표
 
+def transform_sampled_points(points, z_vals, ray_directions, device, h_stddev=1, v_stddev=1, h_mean=math.pi * 0.5, v_mean=math.pi * 0.5, mode='normal'):
+    """Samples a camera position and maps points in camera space to world space."""
+
+    n, num_rays, num_steps, channels = points.shape
+
+    points, z_vals = perturb_points(points, z_vals, ray_directions, device)
+
+
+    camera_origin, pitch, yaw = sample_camera_positions(n=points.shape[0], r=1, horizontal_stddev=h_stddev, vertical_stddev=v_stddev, horizontal_mean=h_mean, vertical_mean=v_mean, device=device, mode=mode)
+    forward_vector = normalize_vecs(-camera_origin)
+
+    cam2world_matrix = create_cam2world_matrix(forward_vector, camera_origin, device=device)
+
+    points_homogeneous = torch.ones((points.shape[0], points.shape[1], points.shape[2], points.shape[3] + 1), device=device)
+    points_homogeneous[:, :, :, :3] = points
+
+    # should be n x 4 x 4 , n x r^2 x num_steps x 4
+    transformed_points = torch.bmm(cam2world_matrix, points_homogeneous.reshape(n, -1, 4).permute(0,2,1)).permute(0, 2, 1).reshape(n, num_rays, num_steps, 4)
+
+
+    transformed_ray_directions = torch.bmm(cam2world_matrix[..., :3, :3], ray_directions.reshape(n, -1, 3).permute(0,2,1)).permute(0, 2, 1).reshape(n, num_rays, 3)
+
+    homogeneous_origins = torch.zeros((n, 4, num_rays), device=device)
+    homogeneous_origins[:, 3, :] = 1
+    transformed_ray_origins = torch.bmm(cam2world_matrix, homogeneous_origins).permute(0, 2, 1).reshape(n, num_rays, 4)[..., :3]
+
+    return transformed_points[..., :3], z_vals, transformed_ray_directions, transformed_ray_origins, pitch, yaw
 
 def truncated_normal_(tensor, mean=0, std=1):
     """ tensor trunction 진행
@@ -67,3 +94,51 @@ def truncated_normal_(tensor, mean=0, std=1):
     tensor.data.copy_(tmp.gather(-1, ind).squeeze(-1))
     tensor.data.mul_(std).add_(mean)
     return tensor 
+
+def fancy_integration(rgb_sigma, z_vals, device, noise_std=0.5, last_back=False, white_back=False, clamp_mode=None, fill_mode=None):
+    """Performs NeRF volumetric rendering."""
+
+    rgbs = rgb_sigma[..., :3]
+    sigmas = rgb_sigma[..., 3:]
+
+    deltas = z_vals[:, :, 1:] - z_vals[:, :, :-1]
+    delta_inf = 1e10 * torch.ones_like(deltas[:, :, :1])
+    deltas = torch.cat([deltas, delta_inf], -2)
+
+    noise = torch.randn(sigmas.shape, device=device) * noise_std
+
+    if clamp_mode == 'softplus':
+        alphas = 1-torch.exp(-deltas * (F.softplus(sigmas + noise)))
+    elif clamp_mode == 'relu':
+        alphas = 1 - torch.exp(-deltas * (F.relu(sigmas + noise)))
+    else:
+        raise "Need to choose clamp mode"
+
+    alphas_shifted = torch.cat([torch.ones_like(alphas[:, :, :1]), 1-alphas + 1e-10], -2)
+    weights = alphas * torch.cumprod(alphas_shifted, -2)[:, :, :-1]
+    weights_sum = weights.sum(2)
+
+    if last_back:
+        weights[:, :, -1] += (1 - weights_sum)
+
+    rgb_final = torch.sum(weights * rgbs, -2)
+    depth_final = torch.sum(weights * z_vals, -2)
+
+    if white_back:
+        rgb_final = rgb_final + 1-weights_sum
+
+    if fill_mode == 'debug':
+        rgb_final[weights_sum.squeeze(-1) < 0.9] = torch.tensor([1., 0, 0], device=rgb_final.device)
+    elif fill_mode == 'weight':
+        rgb_final = weights_sum.expand_as(rgb_final)
+
+    return rgb_final, depth_final, weights
+
+def perturb_points(points, z_vals, ray_directions, device):
+    distance_between_points = z_vals[:,:,1:2,:] - z_vals[:,:,0:1,:]
+    offset = (torch.rand(z_vals.shape, device=device)-0.5) * distance_between_points
+    z_vals = z_vals + offset
+
+    points = points + offset * ray_directions.unsqueeze(2)
+    return points, z_vals
+
