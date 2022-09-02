@@ -219,7 +219,8 @@ class Manifold_predictor(nn.Module):
     input (x,y,z) to scalar s
 
     Args:
-        nn (_type_): _description_
+        init (str): decision for initial manifold shape
+        
     """
     def __init__(self,input_dim=3,hidden_dim=128,
                  act=nn.LeakyReLU(0.2,inplace=True), init='sphere'):
@@ -231,6 +232,7 @@ class Manifold_predictor(nn.Module):
         self.layer1=nn.Linear(self.input_dim,self.hidden_dim)
         self.layer2=nn.Linear(self.hidden_dim,self.hidden_dim)
         self.layer3=nn.Linear(self.hidden_dim,1)
+        # initialize to shpere-like shape
         if self.init=='sphere':
             torch.nn.init.normal_(self.layer1.weight, 0.0, np.sqrt(2)/np.sqrt(hidden_dim))
             torch.nn.init.constant_(self.layer1.bias, 0.0)

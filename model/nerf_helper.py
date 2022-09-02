@@ -31,10 +31,10 @@ def get_initial_rays_trig(n, num_steps, device, fov, resolution, ray_start, ray_
     # Create full screen NDC (-1 to +1) coords [x, y, 0, 1].
     # Y is flipped to follow image memory layouts.
     x, y = torch.meshgrid(torch.linspace(-1, 1, W, device=device),
-                          torch.linspace(1, -1, H, device=device)) # x,y grid
+                          torch.linspace(1, -1, H, device=device)) # x,y grid , it descrete -1 to 1 with W resolution
     x = x.T.flatten() # transform하면 적절하게 x좌표에 맞는다.
     y = y.T.flatten() #  transform하면 잘 맞는다.
-    z = -torch.ones_like(x, device=device) / np.tan((2 * math.pi * fov / 360)/2)
+    z = -torch.ones_like(x, device=device) / np.tan((2 * math.pi * fov / 360)/2) # 
 
     rays_d_cam = normalize_vecs(torch.stack([x, y, z], -1))
 
