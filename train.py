@@ -11,6 +11,8 @@ import torch.multiprocessing as mp
 
 from tqdm import tqdm, trange
 import argparse
+import curriculums
+from model import siren
 
 import matplotlib.pyplot as plt
 
@@ -46,12 +48,19 @@ def z_sampler(shape, device, dist):
         z = torch.rand(shape, device=device) * 2 - 1
     return z
 
-def train():
+def train(rank, world_size, opt):
     torch.manual_seed(0)
     
+    # device setting
     setup(rank, world_size, opt.port)
     device = torch.device(rank)
     
+    # curriculum extracting
+    curriculum = getattr(curriculums, opt.curriculum)
+    metadata = curriculums.extract_metadata(curriculum, 0)
+    
+    # model declaration
+    SIREN = getattr(siren, metadata['model'])
 
 if __name__ == '__main__':
     

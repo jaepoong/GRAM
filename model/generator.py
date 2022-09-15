@@ -13,6 +13,7 @@ class Generator(nn.Module):
         super().__init()
         self.z_dim=z_dim
         self.siren=siren(output_dim=4,z_dim=self.z_dim,input_dim=3)
+        self.manifold=Manifold_predictor()
         self.epoch=0
         self.step=0
     

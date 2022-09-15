@@ -124,6 +124,7 @@ def sample_camera_positions(device, n=1, r=1, horizontal_stddev=1, vertical_stdd
 
     return output_points, phi, theta
 
+
 def truncated_normal_(tensor, mean=0, std=1):
     """ tensor trunction 진행
 
