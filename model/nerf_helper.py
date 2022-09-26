@@ -53,7 +53,7 @@ def transform_sampled_points(points, z_vals, ray_directions, device, h_stddev=1,
 
     n, num_rays, num_steps, channels = points.shape
 
-    points, z_vals = perturb_points(points, z_vals, ray_directions, device)
+    # points, z_vals = perturb_points(points, z_vals, ray_directions, device)
 
 
     camera_origin, pitch, yaw = sample_camera_positions(n=points.shape[0], r=1, horizontal_stddev=h_stddev, vertical_stddev=v_stddev, horizontal_mean=h_mean, vertical_mean=v_mean, device=device, mode=mode)
@@ -191,4 +191,72 @@ def perturb_points(points, z_vals, ray_directions, device):
     points = points + offset * ray_directions.unsqueeze(2)
     return points, z_vals
 
+def create_world2cam_matrix(forward_vector, origin,device):
+    """Takes in the direction the camera is pointing and the camera origin and returns a world2cam matrix."""
+    cam2world = create_cam2world_matrix(forward_vector, origin, device=device)
+    world2cam = torch.inverse(cam2world)
+    return world2cam
+
+def create_cam2world_matrix(forward_vector, origin, device=None):
+    """Takes in the direction the camera is pointing and the camera origin and returns a cam2world matrix."""
+
+    forward_vector = normalize_vecs(forward_vector)
+    up_vector = torch.tensor([0, 1, 0], dtype=torch.float, device=device).expand_as(forward_vector)
+
+    left_vector = normalize_vecs(torch.cross(up_vector, forward_vector, dim=-1))
+
+    up_vector = normalize_vecs(torch.cross(forward_vector, left_vector, dim=-1))
+
+    rotation_matrix = torch.eye(4, device=device).unsqueeze(0).repeat(forward_vector.shape[0], 1, 1)
+    rotation_matrix[:, :3, :3] = torch.stack((-left_vector, up_vector, -forward_vector), axis=-1)
+
+    translation_matrix = torch.eye(4, device=device).unsqueeze(0).repeat(forward_vector.shape[0], 1, 1)
+    translation_matrix[:, :3, 3] = origin
+
+    cam2world = translation_matrix @ rotation_matrix
+
+    return cam2world
+
+def sample_pdf(bins, weights, N_importance, det=False, eps=1e-5):
+    """
+    Sample @N_importance samples from @bins with distribution defined by @weights.
+    Inputs:
+        bins: (N_rays, N_samples_+1) where N_samples_ is "the number of coarse samples per ray - 2"
+        weights: (N_rays, N_samples_)
+        N_importance: the number of samples to draw from the distribution
+        det: deterministic or not
+        eps: a small number to prevent division by zero
+    Outputs:
+        samples: the sampled samples
+    Source: https://github.com/kwea123/nerf_pl/blob/master/models/rendering.py
+    """
+    N_rays, N_samples_ = weights.shape
+    weights = weights + eps # prevent division by zero (don't do inplace op!)
+    pdf = weights / torch.sum(weights, -1, keepdim=True) # (N_rays, N_samples_)
+    cdf = torch.cumsum(pdf, -1) # (N_rays, N_samples), cumulative distribution function
+    cdf = torch.cat([torch.zeros_like(cdf[: ,:1]), cdf], -1)  # (N_rays, N_samples_+1)
+                                                               # padded to 0~1 inclusive
+
+    if det:
+        u = torch.linspace(0, 1, N_importance, device=bins.device)
+        u = u.expand(N_rays, N_importance)
+    else:
+        u = torch.rand(N_rays, N_importance, device=bins.device)
+    u = u.contiguous()
+
+    inds = torch.searchsorted(cdf, u)
+    below = torch.clamp_min(inds-1, 0)
+    above = torch.clamp_max(inds, N_samples_)
+
+    inds_sampled = torch.stack([below, above], -1).view(N_rays, 2*N_importance)
+    cdf_g = torch.gather(cdf, 1, inds_sampled)
+    cdf_g = cdf_g.view(N_rays, N_importance, 2)
+    bins_g = torch.gather(bins, 1, inds_sampled).view(N_rays, N_importance, 2)
+
+    denom = cdf_g[...,1]-cdf_g[...,0]
+    denom[denom<eps] = 1 # denom equals 0 means a bin has weight 0, in which case it will not be sampled
+                         # anyway, therefore any value for it is fine (set to 1 here)
+
+    samples = bins_g[...,0] + (u-cdf_g[...,0])/denom * (bins_g[...,1]-bins_g[...,0])
+    return samples
 

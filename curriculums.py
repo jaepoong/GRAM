@@ -44,45 +44,10 @@ Curriculum Schema:
 
 import math
 
-def next_upsample_step(curriculum, current_step):
-    # Return the epoch when it will next upsample
-    current_metadata = extract_metadata(curriculum, current_step)
-    current_size = current_metadata['img_size']
-    for curriculum_step in sorted([cs for cs in curriculum.keys() if type(cs) == int]):
-        if curriculum_step > current_step and curriculum[curriculum_step].get('img_size', 512) > current_size:
-            return curriculum_step
-    return float('Inf')
-
-def last_upsample_step(curriculum, current_step):
-    # Returns the start epoch of the current stage, i.e. the epoch
-    # it last upsampled
-    current_metadata = extract_metadata(curriculum, current_step)
-    current_size = current_metadata['img_size']
-    for curriculum_step in sorted([cs for cs in curriculum.keys() if type(cs) == int]):
-        if curriculum_step <= current_step and curriculum[curriculum_step]['img_size'] == current_size:
-            return curriculum_step
-    return 0
-
-def get_current_step(curriculum, epoch):
-    step = 0
-    for update_epoch in curriculum['update_epochs']:
-        if epoch >= update_epoch:
-            step += 1
-    return step
-
-def extract_metadata(curriculum, current_step):
-    return_dict = {}
-    for curriculum_step in sorted([cs for cs in curriculum.keys() if type(cs) == int], reverse=True):
-        if curriculum_step <= current_step:
-            for key, value in curriculum[curriculum_step].items():
-                return_dict[key] = value
-            break
-    for key in [k for k in curriculum.keys() if type(k) != int]:
-        return_dict[key] = curriculum[key]
-    return return_dict
 
 
 CelebA = {
+    
     0: {'batch_size': 28 * 2, 'num_steps': 12, 'img_size': 64, 'batch_split': 2, 'gen_lr': 6e-5, 'disc_lr': 2e-4},
     int(200e3): {},
 
@@ -104,9 +69,13 @@ CelebA = {
     'r1_lambda': 0.2,
     'latent_dim': 256,
     'grad_clip': 10,
-    'model': 'SPATIALSIRENBASELINE',
-    'generator': 'ImplicitGenerator3d',
-    'discriminator': 'CCSEncoderDiscriminator',
+#---------- Model --------------
+    'Radiance_Generator': 'Radiance_Generator',
+    'z_dim'
+    'generator': 'Generator',
+    'discriminator': 'ProgressiveEncoderDiscriminator',
+
+
     'dataset': 'CelebA',
     'clamp_mode': 'relu',
     'z_dist': 'gaussian',

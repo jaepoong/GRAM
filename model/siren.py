@@ -44,6 +44,15 @@ def kaiming_leaky_init(m):
     if classname.find('Linear') != -1:
         torch.nn.init.kaiming_normal_(m.weight, a=0.2, mode='fan_in', nonlinearity='leaky_relu')
 
+def frequency_init(freq):
+    """ frequency uniform init -> make random uniform frequency"""
+    def init(m):
+        with torch.no_grad():
+            if isinstance(m, nn.Linear):
+                num_input = m.weight.size(-1)
+                m.weight.uniform_(-np.sqrt(6 / num_input) / freq, np.sqrt(6 / num_input) / freq)
+    return init
+
 class CustomMappingNetwork(nn.Module):
     """ this network is mapping network 
     that make affine transform for siren gamma and beta
@@ -73,6 +82,7 @@ class CustomMappingNetwork(nn.Module):
 
                                     nn.Linear(map_hidden_dim, map_output_dim))
 
+        
         self.network.apply(kaiming_leaky_init)
         with torch.no_grad():
             self.network[-1].weight *= 0.25
@@ -83,15 +93,6 @@ class CustomMappingNetwork(nn.Module):
         phase_shifts = frequencies_offsets[..., frequencies_offsets.shape[-1]//2:]
 
         return frequencies, phase_shifts
-
-def frequency_init(freq):
-    """ frequency uniform init -> make random uniform frequency"""
-    def init(m):
-        with torch.no_grad():
-            if isinstance(m, nn.Linear):
-                num_input = m.weight.size(-1)
-                m.weight.uniform_(-np.sqrt(6 / num_input) / freq, np.sqrt(6 / num_input) / freq)
-    return init
 
 class FiLMLayer(nn.Module):
     def __init__(self, input_dim, hidden_dim):
@@ -148,14 +149,12 @@ class Radiance_Generator(nn.Module):
         num_layer (int) : generator Network의 layer 개수
         
     """
-    def ___init__(self, input_dim=3,output_dim=4 z_dim=100, hidden_dim=256, device=None,num_layers=9):
+    def ___init__(self,z_dim=100, hidden_dim=256, device=None,num_layers=9):
         super().__init__()
         self.device=device
-        self.input_dim = input_dim
         self.z_dim = z_dim
         self.hidden_dim = hidden_dim
         self.num_layers=num_layers
-        self.output_dim=output_dim
         # modulist
         self.layer=nn.ModuleList()
         self.to_occupancy=nn.ModuleList()
@@ -182,8 +181,9 @@ class Radiance_Generator(nn.Module):
         # initiaizing
         self.layer.apply(frequency_init(25))
         self.layer[0].apply(first_layer_film_sine_init)
-        self.to_RGB.apply(kaiming_leaky_init)
-        self.to_occupancy.apply(kaiming_leaky_init)
+        self.to_RGB.apply(frequency_init(25))
+        self.to_occupancy.apply(frequency_init(25))
+        
     def forward(self, input, z, ray_directions, **kwargs):
         frequencies, phase_shifts = self.mapping_network(z) # (9,256),(9,256)
         return self.forward_with_frequencies_phase_shifts(input,frequencies,phase_shifts,ray_directions,**kwargs)
@@ -204,15 +204,14 @@ class Radiance_Generator(nn.Module):
         start=start+self.hidden_dim
         end=end+self.hidden_dim
         x=self.layer[self.num_layers-2](x,frequencies[...,start:end],phase_shifts[...,start:end])
-        occupancy=self.to_occupancy[-1](x,occupancy)
+        occupancy=torch.sigmoid(self.to_occupancy[-1](x,occupancy))
         ### 마지막 skip부분, RGB는 제일 마지막에서 accumulate한번 더한다. ray_direction도 같이 들어감.
         start=start+self.hidden_dim
         end=end+self.hidden_dim
         x=self.layer[self.num_layers-1](torch.cat([ray_directions,x],dim=-1),frequencies[...,start:end],frequencies[...,start:end])
-        rgb=self.to_RGB[-1](x,rgb)
+        rgb=torch.sigmoid(self.to_RGB[-1](x,rgb))
         
         return torch.cat([rgb,occupancy],dim=-1)
-
 
 class Manifold_predictor(nn.Module):
     """manifold_predictor M
@@ -232,6 +231,7 @@ class Manifold_predictor(nn.Module):
         self.layer1=nn.Linear(self.input_dim,self.hidden_dim)
         self.layer2=nn.Linear(self.hidden_dim,self.hidden_dim)
         self.layer3=nn.Linear(self.hidden_dim,1)
+        
         # initialize to shpere-like shape
         if self.init=='sphere':
             torch.nn.init.normal_(self.layer1.weight, 0.0, np.sqrt(2)/np.sqrt(hidden_dim))
@@ -240,8 +240,8 @@ class Manifold_predictor(nn.Module):
             torch.nn.init.normal_(self.layer2.weight, 0.0, np.sqrt(2)/np.sqrt(hidden_dim))
             torch.nn.init.constant_(self.layer2.bias,0.0)
                 
-            torch.nn.init.constant_(self.layer3, 0.0)
-            torch.nn.init.normal_(self.layer3, mean=2*np.sqrt(np.pi) / np.sqrt(hidden_dim), std=0.000001)
+            torch.nn.init.constant_(self.layer3.bias, 0.0)
+            torch.nn.init.normal_(self.layer3.weight, mean=2*np.sqrt(np.pi) / np.sqrt(hidden_dim), std=0.000001)
     
     def forward(self,input):
         x=input
@@ -250,6 +250,53 @@ class Manifold_predictor(nn.Module):
         x=self.layer2(x)
         x=self.act(x)
         return self.layer3(x)
+
+    def calculate_intersection(self,intervals,vals,levels):
+        intersections = []
+        is_valid = []
+        for interval,val,l in zip(intervals,vals,levels):
+            x_l = interval[:,:,0]
+            x_h = interval[:,:,1]
+            s_l = val[:,:,0]
+            s_h = val[:,:,1]
+            scale = torch.where(torch.abs(s_h-s_l) > 0.05,s_h-s_l,torch.ones_like(s_h)*0.05)
+            intersect = torch.where(((s_h-l<=0)*(l-s_l<=0)) & (torch.abs(s_h-s_l) > 0.05),((s_h-l)*x_l + (l-s_l)*x_h)/scale,x_h)
+            intersections.append(intersect)
+            is_valid.append(((s_h-l<=0)*(l-s_l<=0)).to(intersect.dtype))
         
+        return torch.stack(intersections,dim=-2),torch.stack(is_valid,dim=-2) #[batch,N_rays,level,3]    
+
+    def get_intersections(self, input, levels, **kwargs):
+        # levels num_l
+        batch,N_rays,N_points,_ = input.shape
         
+        x = input.reshape(batch,-1,3)
+
+        x=input
+        x=self.layer1(x)
+        x=self.act(x)
+        x=self.layer2(x)
+        x=self.act(x)
+        s = self.layer3(x)
+
+        s = s.reshape(batch,N_rays,N_points,1)
+        s_l = s[:,:,:-1] # like z_vals, make s_vals
+        s_h = s[:,:,1:]
+
+        cost = torch.linspace(N_points-1,0,N_points-1).float().to(input.device).reshape(1,1,-1,1)
+        x_interval = []
+        s_interval = []
+        for l in levels:
+            r = (s_h-l <= 0) * (l-s_l <= 0) * 2 - 1
+            r = r*cost
+            _, indices = torch.max(r,dim=-2,keepdim=True)
+            x_l_select = torch.gather(input,-2,indices.expand(-1, -1, -1, 3)) # [batch,N_rays,1]
+            x_h_select = torch.gather(input,-2,indices.expand(-1, -1, -1, 3)+1) # [batch,N_rays,1]
+            s_l_select = torch.gather(s_l,-2,indices)
+            s_h_select = torch.gather(s_h,-2,indices)
+            x_interval.append(torch.cat([x_l_select,x_h_select],dim=-2))
+            s_interval.append(torch.cat([s_l_select,s_h_select],dim=-2))
         
+        intersections,is_valid = self.calculate_intersection(x_interval,s_interval,levels)
+        
+        return intersections,s,is_valid

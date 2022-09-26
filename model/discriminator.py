@@ -160,6 +160,7 @@ class ProgressiveDiscriminator(nn.Module):
 
         return x
 
+
 class ProgressiveEncoderDiscriminator(nn.Module):
     """
     Implement of a progressive growing discriminator with ResidualCoordConv Blocks.

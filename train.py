@@ -1,20 +1,39 @@
+# Built-in function
 import os, sys
-import numpy as np
-import imageio
+from datetime import datetime
+import copy
 import json
 import random
 import time
+import math
+from collections import deque
+import argparse
+
+
+# utils library
+import numpy as np
+import imageio
+from tqdm import tqdm
+
+# torch
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.multiprocessing as mp
+from torch.nn.parallel import DistributedDataParallel as DDP
 
-from tqdm import tqdm, trange
-import argparse
+
 import curriculums
 from model import siren
 
 import matplotlib.pyplot as plt
+
+from torch_ema import ExponentialMovingAverage
+
+""" this code use data parellel processing with pytorch DDP framwork.
+inference : https://tutorials.pytorch.kr/intermediate/ddp_tutorial.html
+"""
+
 
 def config_parser():
     parser = argparse.ArgumentParser()
@@ -60,7 +79,21 @@ def train(rank, world_size, opt):
     metadata = curriculums.extract_metadata(curriculum, 0)
     
     # model declaration
-    SIREN = getattr(siren, metadata['model'])
+    SIREN = getattr(siren, metadata['Radiance_Generator'])
+    SIREN=SIREN()
+    
+    if opt.load_dir != '':
+        generator = torch.load(os.path.join(opt.load_dir, 'generator.pth'), map_location=device)
+        discriminator = torch.load(os.path.join(opt.load_dir, 'discriminator.pth'), map_location=device)
+        ema = torch.load(os.path.join(opt.load_dir, 'ema.pth'), map_location=device)
+        ema2 = torch.load(os.path.join(opt.load_dir, 'ema2.pth'), map_location=device)
+    else:
+        generator = getattr(generators, metadata['generator'])(SIREN, metadata['latent_dim']).to(device)
+        discriminator = getattr(discriminators, metadata['discriminator'])().to(device)
+        ema = ExponentialMovingAverage(generator.parameters(), decay=0.999)
+        ema2 = ExponentialMovingAverage(generator.parameters(), decay=0.9999)
+
+    
 
 if __name__ == '__main__':
     
